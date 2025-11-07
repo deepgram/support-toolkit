@@ -10,6 +10,13 @@ Deepgram WebSocket Latency Test + TCP Traceroute per Iteration (Long-Running Saf
 6. Writes results immediately to a JSONL file (one JSON per line).
 7. Breaks down potential client-side vs server-side latency issues.
 8. Generates summary with min, max, and average latencies for each metric.
+
+-------------------------------------------------------------------------------
+Example Usage to check latency for different model endpoints:
+    python3 websocket_latency_test.py --model=flux
+    python3 websocket_latency_test.py --model=nova-3
+    python3 websocket_latency_test.py --model=nova-2
+    
 """
 
 import socket
