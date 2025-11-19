@@ -4,7 +4,7 @@ Real-time audio transcription with a beautiful terminal UI. Stream from your mic
 
 ## Quick Start
 ```bash
-pip install -r requirements.txt
+uv sync
 export DEEPGRAM_API_KEY="your_api_key_here"
 ```
 
