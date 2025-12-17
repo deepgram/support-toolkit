@@ -1,0 +1,21 @@
+[project]
+name = "stt-stream-file"
+version = "0.1.0"
+description = "Deepgram STT: stream a file"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "asyncstdlib>=3.13.1",
+    "click>=8.3.1",
+    "colorama>=0.4.6",
+    "librosa>=0.11.0",
+    "pyaudio>=0.2.14",
+    "pydantic>=2.12.4",
+    "pydub>=0.25.1",
+    "textual-dev>=1.8.0",
+    "textual[syntax]>=6.6.0",
+    "tqdm>=4.67.1",
+    "types-colorama>=0.4.15.20250801",
+    "types-pyaudio>=0.2.16.20250801",
+    "websockets==12.0",
+]
