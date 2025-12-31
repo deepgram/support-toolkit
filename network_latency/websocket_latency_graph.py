@@ -88,146 +88,6 @@ def calc_stats(data: list[float]) -> dict:
     }
 
 
-def print_explanations() -> None:
-    """Print customer-friendly explanations of each metric."""
-    print("""
-================================================================================
-                   WEBSOCKET LATENCY EXPLANATION
-================================================================================
-
-This report shows how long each step of establishing a WebSocket connection
-takes. Understanding these metrics helps identify where latency issues originate.
-
---------------------------------------------------------------------------------
-METRICS EXPLAINED
---------------------------------------------------------------------------------
-
-1. DNS Resolution
-   What it measures: Time to convert the domain name (e.g., api.deepgram.com)
-   into an IP address.
-   
-   What's normal: 1-50ms. Often <5ms if cached locally.
-   
-   If this is slow: Your DNS resolver may be slow or overloaded. Consider:
-   - Using a faster DNS provider (8.8.8.8, 1.1.1.1)
-   - Checking if your local DNS cache is working
-   
-   This is purely client-side — Deepgram has no control over this.
-
-2. TCP Connection
-   What it measures: Time to establish a basic network connection to the server
-   (the "three-way handshake": SYN, SYN-ACK, ACK).
-   
-   What's normal: 10-100ms depending on geographic distance. Should be very
-   consistent across measurements.
-   
-   If this is slow or variable: Indicates network path issues:
-   - Geographic distance to server
-   - Network congestion
-   - Packet loss causing retransmissions
-   - ISP routing issues
-   
-   This reflects the network path between you and Deepgram's servers.
-
-3. TLS Handshake
-   What it measures: Time to negotiate encryption after the TCP connection is
-   established. This involves exchanging certificates and cryptographic keys.
-   
-   What's normal: 20-100ms. Typically requires 1-2 network round trips.
-   
-   If this is slow: Could indicate:
-   - Network latency (TLS requires multiple round trips)
-   - Server CPU load during certificate operations
-   - Certificate chain validation issues on the client
-   - Older TLS versions requiring more round trips
-   
-   Mostly network-dependent, with some server-side component.
-
-4. WebSocket Upgrade
-   What it measures: Time from sending the HTTP upgrade request to receiving
-   the "101 Switching Protocols" response. This is when Deepgram's servers
-   process your connection request and authenticate your API key.
-   
-   What's normal: 20-150ms. Includes one network round trip plus server
-   processing time.
-   
-   If this is slow: Could indicate:
-   - Network latency (at least one round trip required)
-   - Server-side processing delays (authentication, resource allocation)
-   - High server load during peak times
-   
-   This is where server-side processing time shows up most clearly.
-   If TCP and TLS are normal but WebSocket upgrade is slow, the issue
-   is likely on the server side.
-
-5. Total Connection Time
-   The sum of all phases above. This is the complete time from starting the
-   request to having a fully established, authenticated WebSocket connection
-   ready to send/receive audio data.
-
-6. Traceroute Final Hop RTT (if collected)
-   What it measures: Round-trip time to Deepgram's servers as measured by
-   traceroute. Useful for understanding the network path.
-   
-   If significantly different from TCP time: May indicate routing changes
-   or network instability.
-
---------------------------------------------------------------------------------
-UNDERSTANDING THE STATISTICS
---------------------------------------------------------------------------------
-
-- Min:    Fastest measurement (best case)
-- Max:    Slowest measurement (worst case) — check for outliers
-- Mean:   Average — useful for overall picture
-- Median: Middle value — less affected by outliers than mean
-- P95:    95th percentile — 95% of requests were faster than this
-- P99:    99th percentile — only 1% of requests were slower
-
-If Mean >> Median: You have outliers pulling the average up. Look at P95/P99.
-If P95 >> Median: Occasional slow requests. May indicate intermittent issues.
-
---------------------------------------------------------------------------------
-UNDERSTANDING THE HISTOGRAMS
---------------------------------------------------------------------------------
-
-- X-axis: Time in milliseconds
-- Y-axis: How many measurements fell into each time bucket
-- Red dashed line: Mean (average)
-- Green dotted line: Median (middle value)
-
-What to look for:
-- Tight, narrow distribution = consistent performance (good)
-- Wide or spread out = variable performance (investigate)
-- Multiple peaks = possible different network paths or server behavior
-- Long tail to the right = occasional slow requests
-
---------------------------------------------------------------------------------
-DIAGNOSING ISSUES
---------------------------------------------------------------------------------
-
-High DNS latency?
-  → Client-side issue. Check your DNS resolver, consider 8.8.8.8 or 1.1.1.1
-
-High TCP latency?
-  → Network path issue. Geographic distance, ISP routing, or congestion.
-    Consider if a closer Deepgram region is available.
-
-High TLS latency?
-  → Mostly network (multiple round trips). Some server component.
-    If much higher than 2x TCP, may indicate certificate issues.
-
-High WebSocket Upgrade latency?
-  → Server-side processing or network. If TCP/TLS are normal but WS upgrade
-    is slow, contact Deepgram support with your dg-request-id values.
-
-Variable latency (high P95 vs median)?
-  → Intermittent network issues or server load. Collect data over longer
-    period to identify patterns (time of day, etc.)
-
-================================================================================
-""")
-
-
 def print_summary(metrics: dict[str, list[float]]) -> None:
     """Print summary statistics."""
     print("\n" + "=" * 70)
@@ -481,11 +341,6 @@ def main():
         action="store_true",
         help="Print summary statistics only, no graphs",
     )
-    parser.add_argument(
-        "--no-explanation",
-        action="store_true",
-        help="Skip the detailed explanation of metrics",
-    )
     
     args = parser.parse_args()
     
@@ -507,10 +362,6 @@ def main():
     
     # Extract metrics from successful results
     metrics = extract_metrics(results)
-    
-    # Print explanation (unless suppressed)
-    if not args.no_explanation:
-        print_explanations()
     
     # Print summary
     print_summary(metrics)
