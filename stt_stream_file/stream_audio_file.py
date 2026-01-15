@@ -653,6 +653,7 @@ async def stream_audio(  # noqa: C901
                 yield data[i : i + chunk_size]
 
     all_messages = []
+    amount_of_audio_sent = 0.0
     try:
         async with websockets.connect(
             url,
@@ -682,8 +683,8 @@ async def stream_audio(  # noqa: C901
                 nonlocal all_messages
                 nonlocal ws_open_time
                 nonlocal nmessages_to_send
+                nonlocal amount_of_audio_sent
 
-                amount_of_audio_sent = 0.0
                 if verbose:
                     # We'll use much more verbose logging than tqdm
                     tqdm_output = open(os.devnull, "w")
@@ -733,6 +734,7 @@ async def stream_audio(  # noqa: C901
             async def receiver(ws):
                 nonlocal all_messages
                 nonlocal aiworks
+                nonlocal amount_of_audio_sent
 
                 async for msg in ws:
                     res = json.loads(msg)
@@ -746,6 +748,7 @@ async def stream_audio(  # noqa: C901
                     res["received"] = datetime.datetime.now(
                         tz=datetime.timezone.utc
                     ).isoformat()
+                    res["audio_cursor"] = amount_of_audio_sent
                     all_messages.append(res)
 
                     if message_callback:

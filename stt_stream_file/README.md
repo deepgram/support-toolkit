@@ -38,10 +38,25 @@ uv run stream_audio_file.py --ui --live \
 
 ### Save & Print Mode
 
-**Stream to file (realtime mode - natural pace):**
+**Stream and save JSON output:**
 ```bash
-uv run stream_audio_file.py -o output.json -f audio.wav --realtime \
+uv run stream_audio_file.py -f audio.wav \
   --url "wss://api.deepgram.com/v1/listen?model=nova-3&interim_results=true"
+```
+
+Output is automatically saved to `audio.json` (derived from input filename).
+
+**Specify a custom output file:**
+```bash
+uv run stream_audio_file.py -o output.json -f audio.wav \
+  --url "wss://api.deepgram.com/v1/listen?model=nova-3&interim_results=true"
+```
+
+**Live recording saves with timestamp:**
+```bash
+uv run stream_audio_file.py --live \
+  --url "wss://api.deepgram.com/v1/listen?model=nova-3&interim_results=true"
+# Saves to recording_20250114_153022.json (or similar)
 ```
 
 **Print basic transcript:**
@@ -74,24 +89,38 @@ It knows this because it knows where it isn't.
 ## Key Options
 
 ### stream_audio_file.py
-- `--ui` - Interactive terminal UI with live updates
-- `-f, --audio` - Audio file to stream
-- `-l, --live` - Stream from microphone
-- `-o, --output` - Save JSON messages to file
-- `-v, -vv, -vvv` - Increase verbosity
+
+| Option | Description |
+|--------|-------------|
+| `--url, -u` | Deepgram websocket URL (required) |
+| `--ui` | Interactive terminal UI with live updates |
+| `-f, --audio` | Audio file to stream |
+| `-l, --live` | Stream from microphone |
+| `-o, --output` | Save JSON messages to file (defaults to input filename or timestamped name) |
+| `-v, -vv, -vvv` | Increase verbosity |
 
 ### print_transcript.py
-- `--print-speakers` - Show speaker labels
-- `--print-channels` - Show audio channels
-- `--print-interim` - Include interim results
-- `--print-delay` - Show latency (time since end of speech)
-- `--colorize` - Color words by confidence
-- `--only-transcript` - Just the text, no metadata
+
+| Option | Description |
+|--------|-------------|
+| `--print-speakers` | Show speaker labels |
+| `--print-channels` | Show audio channels |
+| `--print-interim` | Include interim results |
+| `--print-delay` | Show latency (time since end of speech) |
+| `--colorize` | Color words by confidence |
+| `--only-transcript` | Just the text, no metadata |
 
 Run either script with `--help` for full options.
 
+### Shell Completion
+
+Generate shell completions for your preferred shell:
+
+```bash
+uv run stream_audio_file.py completion bash  # or zsh, fish
+```
+
 ## What's Happening?
 
-The UI mode shows transcription speed in real-time - watch words appear as you speak and see exactly how fast Deepgram processes your audio. The `--print-delay` option reveals latency metrics, perfect for testing different models and configurations.
-
+The UI mode shows transcription speed in real-time—watch words appear as you speak and see exactly how fast Deepgram processes your audio. The `--print-delay` option reveals latency metrics, perfect for testing different models and configurations.
 
