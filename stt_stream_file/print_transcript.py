@@ -911,6 +911,110 @@ class LatencyAggregator:
 
 
 # ============================================================================
+# Response Metrics (TTFT and Update Frequency)
+# ============================================================================
+
+
+class ResponseMetricsAggregator:
+    """
+    Tracks Time-to-First-Transcript (TTFT) and Update Frequency metrics.
+
+    TTFT: Wall-clock time from first audio sent (OpenStream) to first
+    transcript message received (Results or TurnInfo). This includes empty
+    transcripts, as they still indicate Deepgram has processed audio.
+
+    Update Frequency: Number of interim/update messages per second of audio.
+    This captures how "responsive" the transcription feels to users, as more
+    frequent updates create a more fluid real-time experience.
+    """
+
+    def __init__(self) -> None:
+        # TTFT tracking
+        self.first_audio_sent_time: datetime.datetime | None = None
+        self.first_transcript_received_time: datetime.datetime | None = None
+
+        # Update frequency tracking
+        self.interim_message_count: int = 0
+        self.total_audio_duration: float = 0.0
+
+    def record_stream_start(self, received: datetime.datetime) -> None:
+        """Record when audio streaming begins (OpenStream message)."""
+        if self.first_audio_sent_time is None:
+            self.first_audio_sent_time = received
+
+    def record_transcript_message(
+        self, message: dict, received: datetime.datetime
+    ) -> None:
+        """
+        Record a transcript message for TTFT and update frequency tracking.
+
+        Args:
+            message: The Results or TurnInfo message
+            received: When the message was received
+        """
+        msg_type = message.get("type")
+
+        # Track first transcript for TTFT (including empty transcripts)
+        if self.first_transcript_received_time is None:
+            if msg_type in ("Results", "TurnInfo"):
+                self.first_transcript_received_time = received
+
+        # Track interim messages for update frequency
+        if msg_type == "Results":
+            # Nova: Count interim results (is_final=false)
+            if not message.get("is_final", True):
+                self.interim_message_count += 1
+            # Track audio duration from the last message
+            audio_cursor = message.get("audio_cursor")
+            if audio_cursor is not None and audio_cursor > self.total_audio_duration:
+                self.total_audio_duration = audio_cursor
+
+        elif msg_type == "TurnInfo":
+            # Flux: Count Update and TurnResumed events as interim messages
+            event = message.get("event")
+            if event in ("Update", "TurnResumed"):
+                self.interim_message_count += 1
+            # Track audio duration
+            audio_cursor = message.get("audio_cursor")
+            if audio_cursor is not None and audio_cursor > self.total_audio_duration:
+                self.total_audio_duration = audio_cursor
+
+    def get_ttft(self) -> float | None:
+        """
+        Calculate Time-to-First-Transcript in seconds.
+
+        Returns None if either timestamp is missing.
+        """
+        if (
+            self.first_audio_sent_time is None
+            or self.first_transcript_received_time is None
+        ):
+            return None
+        return (
+            self.first_transcript_received_time - self.first_audio_sent_time
+        ).total_seconds()
+
+    def get_update_frequency(self) -> float | None:
+        """
+        Calculate update frequency (interim messages per second of audio).
+
+        Returns None if no audio duration is recorded.
+        """
+        if self.total_audio_duration <= 0:
+            return None
+        return self.interim_message_count / self.total_audio_duration
+
+    def get_stats(self) -> dict:
+        """Return all response metrics."""
+        return {
+            "ttft": self.get_ttft(),
+            "update_frequency": self.get_update_frequency(),
+            "interim_count": self.interim_message_count,
+            "audio_duration": self.total_audio_duration,
+        }
+
+
+# ============================================================================
 # Main Processing Functions
 # ============================================================================
 
@@ -1175,6 +1279,9 @@ class StreamingTranscriptPrinter:
         eot_latency_aggregator = (
             EOTLatencyAggregator() if config.print_latency else None
         )
+        response_metrics_aggregator = (
+            ResponseMetricsAggregator() if config.print_latency else None
+        )
 
         single_line_transcripts: list[str] = []
         for message in messages:
@@ -1216,6 +1323,9 @@ class StreamingTranscriptPrinter:
 
             # Print the OpenStream message if it exists.
             elif message.get("type") == "OpenStream":
+                # Record stream start time for TTFT calculation
+                if response_metrics_aggregator is not None and received is not None:
+                    response_metrics_aggregator.record_stream_start(received)
                 line = cls.render_open_stream(
                     message=message,
                     received=received,
@@ -1241,6 +1351,11 @@ class StreamingTranscriptPrinter:
                 single_line_transcripts.append(line)
 
             elif message.get("type") == "Results":
+                # Record for TTFT and update frequency tracking
+                if response_metrics_aggregator is not None and received is not None:
+                    response_metrics_aggregator.record_transcript_message(
+                        message, received
+                    )
                 line = cls.render_results(
                     message=message,
                     received=received,
@@ -1261,6 +1376,11 @@ class StreamingTranscriptPrinter:
                 single_line_transcripts.append(line)
 
             elif message.get("type") == "TurnInfo":
+                # Record for TTFT and update frequency tracking
+                if response_metrics_aggregator is not None and received is not None:
+                    response_metrics_aggregator.record_transcript_message(
+                        message, received
+                    )
                 line = cls.render_turn_info(
                     message=message,
                     received=received,
@@ -1285,6 +1405,20 @@ class StreamingTranscriptPrinter:
             single_line_transcripts = eot_latency_aggregator.colorize_lines(
                 single_line_transcripts, use_rich_markup=False
             )
+
+        # Append response metrics summary (TTFT and Update Frequency) if enabled
+        if response_metrics_aggregator is not None:
+            stats = response_metrics_aggregator.get_stats()
+            single_line_transcripts.append("")
+            if stats["ttft"] is not None:
+                single_line_transcripts.append(
+                    f"Time-to-First-Transcript: {stats['ttft']:.3f}s"
+                )
+            if stats["update_frequency"] is not None:
+                single_line_transcripts.append(
+                    f"Update Frequency: {stats['update_frequency']:.2f} updates/sec "
+                    f"({stats['interim_count']} updates over {stats['audio_duration']:.1f}s of audio)"
+                )
 
         # Append latency summaries if enabled
         if latency_aggregator is not None:
@@ -1315,6 +1449,9 @@ class StreamingFormatter:
         self.latency_aggregator = LatencyAggregator() if config.print_latency else None
         self.eot_latency_aggregator = (
             EOTLatencyAggregator() if config.print_latency else None
+        )
+        self.response_metrics_aggregator = (
+            ResponseMetricsAggregator() if config.print_latency else None
         )
 
     def format_message(self, message: dict) -> str | None:
@@ -1348,6 +1485,9 @@ class StreamingFormatter:
         msg_type = message.get("type")
 
         if msg_type == "OpenStream":
+            # Record stream start time for TTFT calculation
+            if self.response_metrics_aggregator is not None and received is not None:
+                self.response_metrics_aggregator.record_stream_start(received)
             return StreamingTranscriptPrinter.render_open_stream(
                 message, received, self.config
             )
@@ -1368,6 +1508,11 @@ class StreamingFormatter:
             )
 
         elif msg_type == "Results":
+            # Record for TTFT and update frequency tracking
+            if self.response_metrics_aggregator is not None and received is not None:
+                self.response_metrics_aggregator.record_transcript_message(
+                    message, received
+                )
             return StreamingTranscriptPrinter.render_results(
                 message,
                 received,
@@ -1379,6 +1524,11 @@ class StreamingFormatter:
             )
 
         elif msg_type == "TurnInfo":
+            # Record for TTFT and update frequency tracking
+            if self.response_metrics_aggregator is not None and received is not None:
+                self.response_metrics_aggregator.record_transcript_message(
+                    message, received
+                )
             return StreamingTranscriptPrinter.render_turn_info(
                 message,
                 received,
@@ -1478,7 +1628,7 @@ def remove_text_in_brackets(text: str, remove_newlines: bool = False) -> str:
 @click.option(
     "--print-latency/--skip-latency",
     default=False,
-    help="display latency metrics: interim result latency and end-of-turn (EOT) latency",
+    help="display latency metrics: TTFT, update frequency, message latency, and EOT latency",
 )
 @click.option(
     "--print-entities/--skip-entities", default=False, help="display entities"

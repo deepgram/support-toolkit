@@ -1,4 +1,3 @@
-#!/home/jjmaldonis/miniconda3/envs/deepgram/bin/python
 from typing import AsyncGenerator, BinaryIO, Callable
 import os
 import io

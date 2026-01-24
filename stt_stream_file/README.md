@@ -71,7 +71,7 @@ uv run print_transcript.py -f output.json
 **Print with all the details:**
 ```bash
 uv run print_transcript.py -f output.json \
-  --print-speakers --print-channels --print-interim --print-delay --colorize
+  --print-speakers --print-channels --print-interim --print-latency --colorize
 ```
 ```
 [18:30:24.066 (0.665s since EOS)] [00:00:00.00 - 00:00:03.48] [Speaker 0] [Channel 0] [IsFinal]: The missile knows where it is at all times.
@@ -106,7 +106,9 @@ It knows this because it knows where it isn't.
 | `--print-speakers` | Show speaker labels |
 | `--print-channels` | Show audio channels |
 | `--print-interim` | Include interim results |
-| `--print-delay` | Show latency (time since end of speech) |
+| `--print-received` | Show received timestamp for streamed messages |
+| `--print-latency` | Show latency metrics (TTFT, update frequency, message latency, EOT latency) |
+| `--print-entities` | Show detected entities |
 | `--colorize` | Color words by confidence |
 | `--only-transcript` | Just the text, no metadata |
 
@@ -120,7 +122,18 @@ Generate shell completions for your preferred shell:
 uv run stream_audio_file.py completion bash  # or zsh, fish
 ```
 
+## Metrics Calculated
+
+When using `--print-latency`, the following metrics are computed:
+
+**Session-level:**
+- **TTFT (Time To First Transcript)**: Wall-clock time from when audio streaming begins to when the first transcript message is received. Measures initial responsiveness.
+- **Update Frequency**: Number of interim transcript updates per second of audio. Higher values mean a more fluid, responsive transcription experience.
+
+**Per-message:**
+- **Message Latency**: How far behind the transcription is from the audio being sent, calculated as `audio_cursor - transcript_cursor`. Measured on interim results only, per Deepgram's methodology.
+- **EOT Latency (End-of-Turn Latency)**: Time between the last interim result and the finalizing event (e.g., `speech_final`, `UtteranceEnd`, `EndOfTurn`). Critical for voice agents—they can't respond until they know the user stopped speaking.
+
 ## What's Happening?
 
-The UI mode shows transcription speed in real-time—watch words appear as you speak and see exactly how fast Deepgram processes your audio. The `--print-delay` option reveals latency metrics, perfect for testing different models and configurations.
-
+The UI mode shows transcription speed in real-time—watch words appear as you speak and see exactly how fast Deepgram processes your audio. The `--print-latency` option reveals latency metrics, perfect for testing different models and configurations.
