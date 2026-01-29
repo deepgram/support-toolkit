@@ -180,7 +180,7 @@ async def launch_ui(
     print_speakers: bool = True,
     print_interim: bool = True,
     print_received: bool = True,
-    print_delay: bool = True,
+    print_latency: bool = True,
     print_entities: bool = False,
     colorize: bool = True,
 ):
@@ -191,7 +191,7 @@ async def launch_ui(
         print_speakers=print_speakers,
         print_interim=print_interim,
         print_received=print_received,
-        print_delay=print_delay,
+        print_latency=print_latency,
         print_entities=print_entities,
         colorize=colorize,
         only_transcript=False,
