@@ -9,41 +9,79 @@ Tools for measuring WebSocket connection latency to Deepgram's API.
 
 ## Usage
 
-### 1. Collect Data
+There are **two distinct modes** for different purposes:
 
+### Mode 1: Statistical Analysis (Recommended for most users)
+
+**Purpose**: Collect hundreds of samples quickly to analyze latency distribution, identify patterns, and detect performance issues.
+
+**When to use**: 
+- Initial performance assessment
+- Comparing latency across different times of day
+- Building statistical profiles (min/max/p95/p99)
+- Monitoring performance over time
+
+**How to run**:
 ```bash
+# Collect 10 minutes of data (fast sampling, no traceroute)
+uv run websocket_latency_test.py "wss://api.deepgram.com/v1/listen?model=nova-3" --duration=600 --no-traceroute
+```
+
+**Key characteristics**:
+- Use `--duration=X` to run for X seconds (e.g., 600 = 10 minutes)
+- **Always use `--no-traceroute`** for fast sampling (~0.5s per iteration)
+- Collects 100+ samples in minutes
+- Ideal for generating statistical graphs
+
+### Mode 2: Deep Network Diagnostics
+
+**Purpose**: Detailed hop-by-hop network path analysis to diagnose routing issues or understand where latency occurs.
+
+**When to use**:
+- Troubleshooting unexpected high latency
+- Understanding network routing to Deepgram servers
+- Investigating intermittent connection issues
+- Analyzing specific network path problems
+
+**How to run**:
+```bash
+# Run indefinitely with traceroute (stop with Ctrl+C)
 uv run websocket_latency_test.py "wss://api.deepgram.com/v1/listen?model=nova-3"
 ```
 
-Options:
-- `--duration=60` - Run for 60 seconds (default: indefinite, Ctrl+C to stop)
-- `--no-traceroute` - Disable traceroute for faster collection
-- `--delay=0.5` - Delay between iterations in seconds (default: 0.5)
+**Key characteristics**:
+- Run **without** `--duration` (stops with Ctrl+C)
+- Traceroute enabled by default
+- **Much slower**: ~30+ seconds per iteration (traceroute overhead)
+- Collects ~10-20 samples in 10 minutes
+- Shows hop-by-hop network path to identify routing issues
+
+### Analyzing Results
+
+After collecting data with either mode:
+
+```bash
+# View interactive graphs
+uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl
+
+# Save graphs to file
+uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl -o latency.png
+
+# Include time-series plot
+uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl --time-series
+
+# Statistics only (no graphs)
+uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl --summary-only
+```
+
+### Common Options
+
+Both modes support:
 - `--api-key=KEY` - API key (default: `DEEPGRAM_API_KEY` env var)
 - `--output-dir=DIR` - Output directory (default: `results`)
+- `--delay=X` - Delay between iterations in seconds (default: 0.5)
 
-Output: `results/ws_latency_<hostname>.jsonl`
-
-### 2. Analyze Results
-
-```bash
-uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl
-```
-
-Options:
-- `-o latency.png` - Save graphs to file (default: display interactively)
-- `--time-series` - Also generate latency-over-time plot
-- `--summary-only` - Print statistics only, no graphs
-
-## Example
-
-```bash
-# Collect 60 seconds of data without traceroute
-uv run websocket_latency_test.py "wss://api.deepgram.com/v1/listen?model=nova-3" --duration=60 --no-traceroute
-
-# Generate graphs
-uv run --with matplotlib websocket_latency_graph.py results/ws_latency_api.deepgram.com.jsonl -o latency.png
-```
+Output file: `results/ws_latency_<hostname>.jsonl`
 
 ## What It Measures
 
