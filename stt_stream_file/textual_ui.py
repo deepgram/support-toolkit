@@ -60,6 +60,7 @@ class TranscriptionApp(App):
         sample_rate: int | None,
         verbose: int,
         config: DisplayConfig,
+        play_audio: bool = False,
     ):
         super().__init__()
         self.audio_file = audio_file
@@ -69,6 +70,7 @@ class TranscriptionApp(App):
         self.sample_rate = sample_rate
         self.verbose = verbose
         self.config = config
+        self.play_audio = play_audio
         self.formatter: StreamingFormatter | None = None
         self.stream_task: asyncio.Task | None = None
 
@@ -89,6 +91,8 @@ class TranscriptionApp(App):
                     yield Static("📢 Showing channels", classes="info-line")
                 if self.config.print_interim:
                     yield Static("⏱️  Showing interim results", classes="info-line")
+                if self.play_audio:
+                    yield Static("🔊 Playing audio through speaker", classes="info-line")
 
             with ScrollableContainer(id="transcript-container"):
                 yield RichLog(id="transcript", wrap=True, highlight=True, markup=True)
@@ -154,6 +158,7 @@ class TranscriptionApp(App):
                 sample_rate=self.sample_rate,
                 verbose=self.verbose,
                 message_callback=self.message_callback,
+                play_audio=self.play_audio,
             )
 
             self.update_status("✅ Complete - Press Ctrl+C to exit")
@@ -183,6 +188,7 @@ async def launch_ui(
     print_latency: bool = True,
     print_entities: bool = False,
     colorize: bool = True,
+    play_audio: bool = False,
 ):
     """Launch the Textual UI with the given configuration."""
 
@@ -205,6 +211,7 @@ async def launch_ui(
         sample_rate=sample_rate,
         verbose=verbose,
         config=config,
+        play_audio=play_audio,
     )
 
     await app.run_async()

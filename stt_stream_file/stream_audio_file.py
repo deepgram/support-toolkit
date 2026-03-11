@@ -7,6 +7,7 @@ import struct
 import signal
 import asyncio
 import datetime
+import functools
 import warnings
 import threading
 import traceback
@@ -22,6 +23,88 @@ import asyncstdlib
 import click.shell_completion
 from tqdm.asyncio import tqdm
 from pydub import AudioSegment  # type: ignore
+
+
+# ============================================================================
+# PyAnnote VAD
+# ============================================================================
+
+
+def run_vad(
+    audio_path: str,
+    hf_token: str | None = None,
+    min_duration_on: float = 0.1,
+    min_duration_off: float = 0.15,
+) -> dict:
+    """Run PyAnnote segmentation-3.0 VAD on an audio file.
+
+    Returns a dict suitable for inclusion in the output JSON:
+    {
+        "type": "VADResult",
+        "method": "pyannote-segmentation-3.0",
+        "segments": [{"start": float, "end": float}, ...],
+    }
+    """
+    # ---- PyTorch 2.6 compatibility (must run before importing pyannote) ----
+    import torch
+    import torch.torch_version
+
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+
+    _original_torch_load = torch.load
+
+    @functools.wraps(_original_torch_load)
+    def _patched_torch_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _original_torch_load(*args, **kwargs)
+
+    torch.load = _patched_torch_load
+    # -----------------------------------------------------------------------
+
+    from pyannote.audio import Model
+    from pyannote.audio.pipelines import VoiceActivityDetection
+
+    token = (
+        hf_token
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
+    if not token:
+        raise ValueError(
+            "A HuggingFace token is required for pyannote/segmentation-3.0.\n"
+            "  1. Accept the licence at https://huggingface.co/pyannote/segmentation-3.0\n"
+            "  2. Set the HF_TOKEN environment variable (or pass --hf-token)."
+        )
+
+    print("[pyannote] Loading segmentation-3.0 model ...", file=sys.stderr)
+    model = Model.from_pretrained(
+        "pyannote/segmentation-3.0",
+        use_auth_token=token,
+    )
+
+    pipeline = VoiceActivityDetection(segmentation=model)
+    pipeline.instantiate(
+        {
+            "min_duration_on": min_duration_on,
+            "min_duration_off": min_duration_off,
+        }
+    )
+
+    print(f"[pyannote] Processing {audio_path} ...", file=sys.stderr)
+    annotation = pipeline(audio_path)
+
+    segments = [
+        {"start": round(turn.start, 6), "end": round(turn.end, 6)}
+        for turn in annotation.get_timeline().support()
+    ]
+    print(f"[pyannote] {len(segments)} speech segments detected.", file=sys.stderr)
+
+    return {
+        "type": "VADResult",
+        "method": "pyannote-segmentation-3.0",
+        "segments": segments,
+    }
 
 
 def format_time(seconds: float) -> str:
@@ -216,6 +299,47 @@ class Microphone:
             self._audio = None
 
         self._executor.shutdown(wait=True)
+
+
+class AudioPlayer:
+    """Plays an audio file through the speaker in a background thread.
+
+    Uses pydub to decode the file (handles WAV, MP3, FLAC, etc.) and pyaudio
+    to stream raw PCM to the default output device.  Playback runs at native
+    real-time speed because pyaudio.Stream.write blocks until the audio buffer
+    is consumed.
+    """
+
+    def __init__(self, filename: str) -> None:
+        self._segment = AudioSegment.from_file(filename)
+        self._audio = pyaudio.PyAudio()
+        self._stream = self._audio.open(
+            format=self._audio.get_format_from_width(self._segment.sample_width),
+            channels=self._segment.channels,
+            rate=self._segment.frame_rate,
+            output=True,
+        )
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._play_loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2)
+        self._stream.stop_stream()
+        self._stream.close()
+        self._audio.terminate()
+
+    def _play_loop(self) -> None:
+        raw = self._segment.raw_data
+        bytes_per_sample = self._segment.channels * self._segment.sample_width
+        chunk_size = 1024 * bytes_per_sample
+        for i in range(0, len(raw), chunk_size):
+            if self._stop_event.is_set():
+                break
+            self._stream.write(raw[i : i + chunk_size])
 
 
 def generate_audio_header(
@@ -535,7 +659,7 @@ class VerifyAudioFile:
 
 
 def calculate_chunk_parameters(
-    channels, sample_width, sample_rate, preferred_duration=0.1
+    channels, sample_width, sample_rate, preferred_duration=0.02
 ):
     """
     Calculate the chunk size and real-time resolution based on audio properties.
@@ -559,6 +683,8 @@ async def stream_audio(  # noqa: C901
     sample_rate: int | None = None,
     verbose: int = 0,
     message_callback: Callable | None = None,
+    vad: bool = False,
+    play_audio: bool = False,
 ):
     """
     Stream audio from a file or from the microphone to a Deepgram websocket.
@@ -595,7 +721,7 @@ async def stream_audio(  # noqa: C901
                 print(f"Error streaming audio: {e}", file=sys.stderr)
                 await shutdown(None, microphone)
 
-        realtime_resolution = 0.1
+        realtime_resolution = 0.02
 
         # The microphone streams 16kHz single-channel linear16 audio.
         # We need to add these params to the URL (if they don't exist already).
@@ -651,8 +777,17 @@ async def stream_audio(  # noqa: C901
             for i in range(0, len(data), chunk_size):
                 yield data[i : i + chunk_size]
 
+    # Launch VAD in background thread if requested (file mode only)
+    vad_future: asyncio.Task | None = None
+    if vad and filename is not None:
+        loop = asyncio.get_event_loop()
+        vad_future = loop.run_in_executor(None, run_vad, filename)
+
     all_messages = []
     amount_of_audio_sent = 0.0
+    # Tracks wall-clock time when each chunk of audio was sent over the websocket.
+    # Each entry: {"audio_cursor": seconds_of_audio_sent, "sent_at": iso_timestamp}
+    audio_send_times: list[dict[str, float | str]] = []
     try:
         async with websockets.connect(
             url,
@@ -683,6 +818,7 @@ async def stream_audio(  # noqa: C901
                 nonlocal ws_open_time
                 nonlocal nmessages_to_send
                 nonlocal amount_of_audio_sent
+                nonlocal audio_send_times
 
                 if verbose:
                     # We'll use much more verbose logging than tqdm
@@ -702,13 +838,15 @@ async def stream_audio(  # noqa: C901
                         file=tqdm_output,
                     )
                 ):
-                    now = datetime.datetime.now(tz=datetime.timezone.utc)
-                    time_since_ws_open = (now - ws_open_time).total_seconds()
                     if not live:
-                        wait_for = amount_of_audio_sent - time_since_ws_open
+                        # Sleep until it's time to send this chunk.
+                        # Use the absolute target time to avoid drift from stale timestamps.
+                        target_time = ws_open_time + datetime.timedelta(seconds=amount_of_audio_sent)
+                        wait_for = (target_time - datetime.datetime.now(tz=datetime.timezone.utc)).total_seconds()
                         if wait_for > 0:
                             await asyncio.sleep(wait_for)
                         if verbose >= 2:
+                            now = datetime.datetime.now(tz=datetime.timezone.utc)
                             print(
                                 f"Sending {len(chunk)} bytes in message {c}/{nmessages_to_send or 'inf'} "  # type: ignore
                                 f"({realtime_resolution} seconds of audio totaling {amount_of_audio_sent + realtime_resolution:0.2f} seconds)"
@@ -717,6 +855,7 @@ async def stream_audio(  # noqa: C901
                                 file=sys.stderr,
                             )
                     elif verbose >= 2:
+                        now = datetime.datetime.now(tz=datetime.timezone.utc)
                         print(
                             f"Sending {len(chunk)} bytes in message {c} "  # type: ignore
                             f"({realtime_resolution} seconds of audio) "
@@ -726,6 +865,11 @@ async def stream_audio(  # noqa: C901
                     if ws.open:
                         await ws.send(chunk)  # type: ignore
                         amount_of_audio_sent += realtime_resolution
+                        if vad:
+                            audio_send_times.append({
+                                "audio_cursor": round(amount_of_audio_sent, 6),
+                                "sent_at": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
+                            })
 
                 if ws.open:
                     await ws.send(json.dumps({"type": "CloseStream"}))
@@ -769,9 +913,18 @@ async def stream_audio(  # noqa: C901
                     elif verbose >= 2:
                         print(f"Received message from Deepgram: {res}", file=sys.stderr)
 
-            await asyncio.gather(
-                asyncio.ensure_future(sender(ws)), asyncio.ensure_future(receiver(ws))
-            )
+            audio_player: AudioPlayer | None = None
+            if play_audio and filename is not None:
+                audio_player = AudioPlayer(filename)
+                audio_player.start()
+
+            try:
+                await asyncio.gather(
+                    asyncio.ensure_future(sender(ws)), asyncio.ensure_future(receiver(ws))
+                )
+            finally:
+                if audio_player is not None:
+                    audio_player.stop()
     except websockets.exceptions.InvalidStatusCode as e:
         print(f"\n\nHeaders: {e.headers}", file=sys.stderr)
         await shutdown(None, microphone)
@@ -781,6 +934,15 @@ async def stream_audio(  # noqa: C901
         # such as when the user presses using Ctrl+C
         print(traceback.format_exc(), file=sys.stderr)
         pass
+
+    # Collect VAD results if running
+    if vad_future is not None:
+        try:
+            vad_result = await vad_future
+            vad_result["audio_send_times"] = audio_send_times
+            all_messages.append(vad_result)
+        except Exception as e:
+            print(f"[pyannote] VAD failed: {e}", file=sys.stderr)
 
     with open(output_filename, "w") as of:
         print(json.dumps(all_messages, indent=2, ensure_ascii=False), file=of)
@@ -873,6 +1035,17 @@ def parse_audio_details_from_url(
     help="launch Textual UI (ignores --output)",
 )
 @click.option("-v", "--verbose", count=True, help="increase verbosity, e.g. -vvv")
+@click.option(
+    "--vad/--no-vad",
+    default=False,
+    help="run PyAnnote VAD on the audio file concurrently (requires HF_TOKEN env var)",
+)
+@click.option(
+    "--play-audio",
+    is_flag=True,
+    default=False,
+    help="play audio through the speaker as it streams (file mode only)",
+)
 def main(
     output: str,
     url: str,
@@ -880,6 +1053,8 @@ def main(
     live: bool,
     verbose: int = 0,
     ui: bool = False,
+    vad: bool = False,
+    play_audio: bool = False,
 ):
     if audio is None:
         assert live is True
@@ -909,12 +1084,12 @@ def main(
 
         loop = asyncio.get_event_loop()
         loop.run_until_complete(
-            launch_ui(audio, url, encoding, channels, sample_rate, verbose)
+            launch_ui(audio, url, encoding, channels, sample_rate, verbose, play_audio=play_audio)
         )
     else:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(
-            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose)
+            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose, vad=vad, play_audio=play_audio)
         )
 
 

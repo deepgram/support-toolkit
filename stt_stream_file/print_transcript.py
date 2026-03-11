@@ -522,38 +522,42 @@ class EOTLatencyAggregator:
     """
     Calculates End-of-Turn (EOT) latency for streaming transcription.
 
-    EOT latency measures the time between receiving the last interim result
-    and receiving a finalizing event. This represents the additional delay,
-    on top of interim result latency, required to identify that the user has
-    finished speaking. This is critical for voice agents because they cannot
-    respond until they know the user is done.
+    EOT latency measures the time from when the user finished speaking to when
+    we receive the finalizing transcript event. Requires VAD data (--vad flag)
+    to determine when speech actually ended.
+
+    The calculation is:
+        eot_latency = received_time_of_finalizing_event
+                    - wall_clock_time_when_vad_segment_end_audio_was_sent
 
     Supported EOT events:
-    - Nova: is_final=true, speech_final=true, UtteranceEnd
+    - Nova: speech_final, UtteranceEnd (is_final without speech_final is NOT an EOT event)
     - Flux: EndOfTurn, EagerEndOfTurn
     """
 
-    def __init__(self) -> None:
-        # Track the last interim result time per channel
-        self.last_interim_time: dict[int, datetime.datetime] = {}
+    def __init__(
+        self,
+        vad_segments: list[dict] | None = None,
+        audio_send_times: list[dict] | None = None,
+    ) -> None:
+        # VAD data for EOT latency calculation
+        self.vad_segments: list[dict] = vad_segments or []
+        self.audio_send_times: list[dict] = audio_send_times or []
+
+        # Nova: track Results messages for UtteranceEnd last_word_end lookup
+        self.results_history: list[dict] = []
+
         # Store measurements as (event_type, latency_seconds)
         self.measurements: list[tuple[str, float]] = []
 
-    def record_interim(self, message: dict, received: datetime.datetime) -> None:
-        """Record the time of an interim result (Nova or Flux)."""
-        # Nova: Results with is_final=false
-        if message.get("type") == "Results":
-            if message.get("is_final", False):
-                return  # Not an interim result
-            channel = message.get("channel_index", [0])[0]
-            self.last_interim_time[channel] = received
+    @property
+    def has_vad_data(self) -> bool:
+        return bool(self.vad_segments) and bool(self.audio_send_times)
 
-        # Flux: TurnInfo with Update or StartOfTurn event
-        elif message.get("type") == "TurnInfo":
-            event = message.get("event")
-            if event in ("Update", "StartOfTurn"):
-                # Flux doesn't have channels, use 0
-                self.last_interim_time[0] = received
+    def record_message(self, message: dict) -> None:
+        """Record a Results message for later UtteranceEnd lookup."""
+        if message.get("type") == "Results":
+            self.results_history.append(message)
 
     def calculate_eot_latency(
         self, message: dict, received: datetime.datetime
@@ -562,57 +566,112 @@ class EOTLatencyAggregator:
         Calculate EOT latency for end-of-turn events.
 
         Returns (event_type, latency_seconds) or None if not an EOT event
-        or if there was no preceding interim result.
+        or if VAD data is unavailable.
         """
-        event_type: str | None = None
-        channel: int = 0
+        if not self.has_vad_data:
+            return None
 
-        # Nova: Check for EOT events in Results messages
-        if message.get("type") == "Results":
-            channel = message.get("channel_index", [0])[0]
-            if message.get("speech_final", False):
-                event_type = "speech_final"
-            elif message.get("is_final", False):
-                event_type = "is_final"
+        # Nova: speech_final
+        if message.get("type") == "Results" and message.get("speech_final", False):
+            start = message.get("start", 0)
+            duration = message.get("duration", 0)
+            return self._vad_latency(start, start + duration, received, "speech_final")
 
-        # Nova: UtteranceEnd message
-        elif message.get("type") == "UtteranceEnd":
-            channel = message.get("channel", [0])[0]
-            event_type = "UtteranceEnd"
+        # Nova: UtteranceEnd
+        if message.get("type") == "UtteranceEnd":
+            return self._utterance_end_latency(message, received)
 
-        # Flux: TurnInfo with EndOfTurn or EagerEndOfTurn event
-        elif message.get("type") == "TurnInfo":
+        # Flux: EndOfTurn or EagerEndOfTurn
+        if message.get("type") == "TurnInfo":
             event = message.get("event")
-            if event == "EndOfTurn":
-                event_type = "EndOfTurn"
-                channel = 0  # Flux doesn't have channels
-            elif event == "EagerEndOfTurn":
-                event_type = "EagerEndOfTurn"
-                channel = 0
+            if event in ("EndOfTurn", "EagerEndOfTurn"):
+                start = message.get("audio_window_start", 0)
+                end = message.get("audio_window_end", 0)
+                return self._vad_latency(start, end, received, event)
 
-        if event_type is None:
+        return None
+
+    def _vad_latency(
+        self,
+        window_start: float,
+        window_end: float,
+        received: datetime.datetime,
+        event_type: str,
+    ) -> tuple[str, float] | None:
+        """Compute VAD-based EOT latency for a finalizing event.
+
+        Finds the VAD segment whose end falls within the audio window, then
+        looks up the wall-clock time when that audio was sent.
+        """
+        vad_seg = self._find_vad_segment_ending_in(window_start, window_end)
+        if vad_seg is None:
             return None
 
-        # Get the last interim time for this channel
-        last_interim = self.last_interim_time.get(channel)
-        if last_interim is None:
-            # No preceding interim result recorded
+        sent_at = self._wall_clock_for_audio_time(vad_seg["end"])
+        if sent_at is None:
             return None
 
-        # Calculate latency
-        eot_latency = (received - last_interim).total_seconds()
-
-        # Only record positive latencies (negative would indicate timing issues)
+        eot_latency = (received - sent_at).total_seconds()
         if eot_latency >= 0:
             self.measurements.append((event_type, eot_latency))
-
-        # Clear the last interim time for this channel after a definitive EOT event
-        # - Nova: speech_final and UtteranceEnd are definitive; is_final may have more
-        # - Flux: EndOfTurn is definitive; EagerEndOfTurn may be followed by TurnResumed
-        if event_type in ("speech_final", "UtteranceEnd", "EndOfTurn"):
-            self.last_interim_time.pop(channel, None)
-
         return (event_type, eot_latency)
+
+    def _utterance_end_latency(
+        self, message: dict, received: datetime.datetime
+    ) -> tuple[str, float] | None:
+        """Compute VAD-based EOT latency for a Nova UtteranceEnd message.
+
+        Uses last_word_end to find the Results message containing a word with
+        a matching end timestamp, then uses that message's audio window to
+        locate the VAD segment.
+        """
+        last_word_end = message.get("last_word_end", 0)
+        if last_word_end <= 0:
+            return None
+
+        channel = message.get("channel", [0])[0]
+
+        # Find the most recent Results message on this channel that contains
+        # a word whose end timestamp matches last_word_end.
+        target_message: dict | None = None
+        for msg in reversed(self.results_history):
+            if msg.get("channel_index", [0])[0] != channel:
+                continue
+            words = msg.get("channel", {}).get("alternatives", [{}])[0].get("words", [])
+            if any(w.get("end") == last_word_end for w in words):
+                target_message = msg
+                break
+
+        if target_message is None:
+            return None
+
+        start = target_message.get("start", 0)
+        duration = target_message.get("duration", 0)
+        return self._vad_latency(start, start + duration, received, "UtteranceEnd")
+
+    def _find_vad_segment_ending_in(
+        self, window_start: float, window_end: float
+    ) -> dict | None:
+        """Find the last VAD segment whose end falls within the given audio window."""
+        result = None
+        for seg in self.vad_segments:
+            if window_start <= seg["end"] <= window_end:
+                result = seg
+        return result
+
+    def _wall_clock_for_audio_time(
+        self, audio_time: float
+    ) -> datetime.datetime | None:
+        """Find the wall-clock time when the chunk containing audio_time was sent.
+
+        audio_send_times entries have audio_cursor (cumulative seconds sent after
+        this chunk) and sent_at (ISO timestamp). The first entry where
+        audio_cursor >= audio_time is the chunk that contained that audio.
+        """
+        for entry in self.audio_send_times:
+            if entry["audio_cursor"] >= audio_time:
+                return datetime.datetime.fromisoformat(entry["sent_at"])
+        return None
 
     def get_stats(self) -> dict:
         """Return EOT latency statistics."""
@@ -665,7 +724,7 @@ class EOTLatencyAggregator:
         """Return formatted summary string."""
         stats = self.get_stats()
         if stats["count"] == 0:
-            return "No EOT latency measurements (requires interim_results=true and EOT events)"
+            return "No EOT latency measurements (requires --vad flag during audio streaming)"
 
         lines = [
             f"EOT Latency: min={stats['min']:.3f}s, p50={stats['p50']:.3f}s, "
@@ -1276,15 +1335,30 @@ class StreamingTranscriptPrinter:
 
         # Initialize latency aggregators if latency printing is enabled
         latency_aggregator = LatencyAggregator() if config.print_latency else None
+
+        # Extract VAD data from messages (if present) for EOT latency
+        vad_segments: list[dict] | None = None
+        audio_send_times: list[dict] | None = None
+        for msg in messages:
+            if msg.get("type") == "VADResult":
+                vad_segments = msg.get("segments")
+                audio_send_times = msg.get("audio_send_times")
+                break
         eot_latency_aggregator = (
-            EOTLatencyAggregator() if config.print_latency else None
+            EOTLatencyAggregator(vad_segments, audio_send_times)
+            if config.print_latency
+            else None
         )
+
         response_metrics_aggregator = (
             ResponseMetricsAggregator() if config.print_latency else None
         )
 
         single_line_transcripts: list[str] = []
         for message in messages:
+            # Skip the VADResult message (already extracted above)
+            if message.get("type") == "VADResult":
+                continue
             # Parse received time
             received_iso = message.get("received", None)
             if received_iso is None:
@@ -1298,17 +1372,16 @@ class StreamingTranscriptPrinter:
                 if message.get("type") in ("Results", "TurnInfo"):
                     latency = latency_aggregator.calculate_latency(message)
 
-            # Track interim results and calculate EOT latency
+            # Track messages and calculate EOT latency
             eot_latency = None
-            if eot_latency_aggregator is not None and received is not None:
-                # Record interim results (Nova and Flux)
-                eot_latency_aggregator.record_interim(message, received)
-                # Calculate EOT latency for finalizing events
-                eot_result = eot_latency_aggregator.calculate_eot_latency(
-                    message, received
-                )
-                if eot_result is not None:
-                    eot_latency = eot_result[1]
+            if eot_latency_aggregator is not None:
+                eot_latency_aggregator.record_message(message)
+                if received is not None:
+                    eot_result = eot_latency_aggregator.calculate_eot_latency(
+                        message, received
+                    )
+                    if eot_result is not None:
+                        eot_latency = eot_result[1]
 
             # Handle UtteranceEnd messages separately because they have a different type.
             line: str | None
@@ -1454,8 +1527,22 @@ class StreamingFormatter:
             ResponseMetricsAggregator() if config.print_latency else None
         )
 
+    def provide_vad_data(
+        self,
+        vad_segments: list[dict],
+        audio_send_times: list[dict],
+    ) -> None:
+        """Provide VAD data to the EOT latency aggregator after initialization."""
+        if self.eot_latency_aggregator is not None:
+            self.eot_latency_aggregator.vad_segments = vad_segments
+            self.eot_latency_aggregator.audio_send_times = audio_send_times
+
     def format_message(self, message: dict) -> str | None:
         """Format a single message and return the formatted string"""
+
+        # Skip VADResult messages (not a transcript message)
+        if message.get("type") == "VADResult":
+            return None
 
         # Parse received time
         received = None
@@ -1469,17 +1556,16 @@ class StreamingFormatter:
             if message.get("type") in ("Results", "TurnInfo"):
                 latency = self.latency_aggregator.calculate_latency(message)
 
-        # Track interim results and calculate EOT latency
+        # Track messages and calculate EOT latency
         eot_latency = None
-        if self.eot_latency_aggregator is not None and received is not None:
-            # Record interim results (Nova and Flux)
-            self.eot_latency_aggregator.record_interim(message, received)
-            # Calculate EOT latency for finalizing events
-            eot_result = self.eot_latency_aggregator.calculate_eot_latency(
-                message, received
-            )
-            if eot_result is not None:
-                eot_latency = eot_result[1]
+        if self.eot_latency_aggregator is not None:
+            self.eot_latency_aggregator.record_message(message)
+            if received is not None:
+                eot_result = self.eot_latency_aggregator.calculate_eot_latency(
+                    message, received
+                )
+                if eot_result is not None:
+                    eot_latency = eot_result[1]
 
         # Handle different message types
         msg_type = message.get("type")
