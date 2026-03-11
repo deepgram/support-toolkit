@@ -8,6 +8,12 @@ uv sync
 export DEEPGRAM_API_KEY="your_api_key_here"
 ```
 
+To use `--vad` for EOT latency measurement:
+```bash
+export HF_TOKEN="your_huggingface_token"
+```
+You must first accept the licence at https://huggingface.co/pyannote/segmentation-3.0
+
 Then launch the UI and start talking:
 ```bash
 uv run stream_audio_file.py --ui --live \
@@ -98,6 +104,8 @@ It knows this because it knows where it isn't.
 | `-l, --live` | Stream from microphone |
 | `-o, --output` | Save JSON messages to file (defaults to input filename or timestamped name) |
 | `-v, -vv, -vvv` | Increase verbosity |
+| `--vad/--no-vad` | Run PyAnnote VAD concurrently to enable EOT latency measurement (requires `HF_TOKEN` env var) |
+| `--play-audio` | Play audio through the speaker as it streams (file mode only) |
 
 ### print_transcript.py
 
@@ -132,7 +140,7 @@ When using `--print-latency`, the following metrics are computed:
 
 **Per-message:**
 - **Message Latency**: How far behind the transcription is from the audio being sent, calculated as `audio_cursor - transcript_cursor`. Measured on interim results only, per Deepgram's methodology.
-- **EOT Latency (End-of-Turn Latency)**: Time between the last interim result and the finalizing event (e.g., `speech_final`, `UtteranceEnd`, `EndOfTurn`). Critical for voice agents—they can't respond until they know the user stopped speaking.
+- **EOT Latency (End-of-Turn Latency)**: Time from when the user finished speaking to when the finalizing transcript event is received (e.g., `speech_final`, `UtteranceEnd`, `EndOfTurn`). Requires `--vad` flag — uses PyAnnote VAD to detect when speech actually ended, and measures wall-clock time from when that audio was sent over the websocket to when the response arrived. Critical for voice agents — they can't respond until they know the user stopped speaking.
 
 ## What's Happening?
 
