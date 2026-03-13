@@ -551,7 +551,7 @@ def calculate_chunk_parameters(
 
 
 async def stream_audio(  # noqa: C901
-    output_filename: str,
+    output_filename: str | None,
     filename: str | None,
     url: str,
     encoding: str | None = None,
@@ -559,12 +559,24 @@ async def stream_audio(  # noqa: C901
     sample_rate: int | None = None,
     verbose: int = 0,
     message_callback: Callable | None = None,
+    data_source: AsyncGenerator[bytes, None] | None = None,
 ):
     """
-    Stream audio from a file or from the microphone to a Deepgram websocket.
-    If `filename` is None, the audio will be streamed from the microphone.
+    Stream audio from a file, from the microphone, or from an external
+    data source to a Deepgram websocket.
+
+    If `data_source` is provided, it is used directly as the audio stream
+    (no file or microphone setup is performed). This allows callers to feed
+    audio from any async source (e.g. a web app receiving audio over SocketIO).
+
+    If `data_source` is None and `filename` is None, audio is streamed from
+    the microphone. If `filename` is provided, the file is streamed.
+
+    If `output_filename` is None, no JSON output file is written.
     """
-    if filename is None:
+    if data_source is not None:
+        live = True
+    elif filename is None:
         live = True
     else:
         live = False
@@ -575,7 +587,18 @@ async def stream_audio(  # noqa: C901
     else:
         aiworks = False
 
-    if filename is None:  # `live` is True
+    if data_source is not None:
+        # External data source — caller provides the audio stream directly.
+        # No file analysis, no microphone, no pacing (caller controls timing).
+        nmessages_to_send = None
+        microphone = None
+        realtime_resolution = 0.0
+
+        async def data_stream() -> AsyncGenerator[bytes, None]:
+            async for chunk in data_source:
+                yield chunk
+
+    elif filename is None:  # `live` is True
         nmessages_to_send = None
         if verbose >= 2:
             output_audio_filename = (
@@ -658,13 +681,18 @@ async def stream_audio(  # noqa: C901
             url,
             extra_headers={"Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}"},
         ) as ws:
-            loop = asyncio.get_event_loop()
-            loop.add_signal_handler(
-                signal.SIGINT, lambda: asyncio.ensure_future(shutdown(ws, microphone))
-            )
-            loop.add_signal_handler(
-                signal.SIGTERM, lambda: asyncio.ensure_future(shutdown(ws, microphone))
-            )
+            # Signal handlers only work in the main thread; skip when called
+            # from a web server's asyncio task.
+            try:
+                loop = asyncio.get_event_loop()
+                loop.add_signal_handler(
+                    signal.SIGINT, lambda: asyncio.ensure_future(shutdown(ws, microphone))
+                )
+                loop.add_signal_handler(
+                    signal.SIGTERM, lambda: asyncio.ensure_future(shutdown(ws, microphone))
+                )
+            except (ValueError, RuntimeError):
+                pass
 
             ws_open_time = datetime.datetime.now(tz=datetime.timezone.utc)
             custom_open_message = {
@@ -678,7 +706,6 @@ async def stream_audio(  # noqa: C901
             print(f"Request ID: {request_id}", file=sys.stderr)
 
             async def sender(ws: websockets.WebSocketClientProtocol):
-                nonlocal data
                 nonlocal all_messages
                 nonlocal ws_open_time
                 nonlocal nmessages_to_send
@@ -782,9 +809,10 @@ async def stream_audio(  # noqa: C901
         print(traceback.format_exc(), file=sys.stderr)
         pass
 
-    with open(output_filename, "w") as of:
-        print(json.dumps(all_messages, indent=2, ensure_ascii=False), file=of)
-        print(f"Saved transcript to {output_filename}")
+    if output_filename is not None:
+        with open(output_filename, "w") as of:
+            print(json.dumps(all_messages, indent=2, ensure_ascii=False), file=of)
+            print(f"Saved transcript to {output_filename}")
 
     now = datetime.datetime.now(tz=datetime.timezone.utc)
     print(f"Websocket was open for {now - ws_open_time}", file=sys.stderr)
