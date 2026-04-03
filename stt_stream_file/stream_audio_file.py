@@ -762,7 +762,7 @@ async def stream_audio(  # noqa: C901
         )
         # Print metadata about the audio file to stderr
         print(
-            f"Audio file metadata: {channels} channel(s), {sample_width}-bit sample width, {sample_rate} Hz, {duration} seconds",
+            f"Audio file metadata: {channels} channel(s), {sample_width * 8}-bit sample width, {sample_rate} Hz, {duration} seconds",
             file=sys.stderr,
         )
 
