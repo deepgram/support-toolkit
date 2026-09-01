@@ -659,16 +659,23 @@ class VerifyAudioFile:
 
 
 def calculate_chunk_parameters(
-    channels, sample_width, sample_rate, preferred_duration=0.02
+    channels, sample_width, sample_rate, preferred_duration=0.02,
+    file_size=None, duration=None,
 ):
     """
     Calculate the chunk size and real-time resolution based on audio properties.
     `preferred_duration` sets the duration of audio sent in each chunk.
-    """
-    bytes_per_sample = channels * sample_width
-    bytes_per_second = sample_rate * bytes_per_sample
 
-    chunk_size = int(bytes_per_second * preferred_duration)
+    Chunks are sliced out of the file exactly as it sits on disk, so the pacing
+    must use the on-disk byte rate. For compressed containers that is far lower
+    than the decoded PCM rate, and using the latter streams faster than realtime.
+    """
+    if file_size is not None and duration:
+        bytes_per_second = file_size / duration
+    else:
+        bytes_per_second = sample_rate * channels * sample_width
+
+    chunk_size = max(1, int(bytes_per_second * preferred_duration))
     realtime_resolution = preferred_duration
 
     return chunk_size, realtime_resolution
@@ -758,7 +765,11 @@ async def stream_audio(  # noqa: C901
             filename, encoding, channels, sample_rate, duration=None
         )
         chunk_size, realtime_resolution = calculate_chunk_parameters(
-            channels, sample_width, sample_rate
+            channels,
+            sample_width,
+            sample_rate,
+            file_size=os.path.getsize(filename),
+            duration=duration,
         )
         # Print metadata about the audio file to stderr
         print(
@@ -772,6 +783,15 @@ async def stream_audio(  # noqa: C901
         nmessages_to_send = len(data) // chunk_size
         if len(data) % chunk_size:
             nmessages_to_send += 1
+
+        paced_span = nmessages_to_send * realtime_resolution
+        if duration and abs(paced_span - duration) / duration > 0.05:
+            print(
+                f"WARNING: pacing would stream {duration:.1f}s of audio over "
+                f"{paced_span:.1f}s ({duration / paced_span:.2f}x realtime). "
+                "Latency measurements will not be meaningful.",
+                file=sys.stderr,
+            )
 
         async def data_stream() -> AsyncGenerator[bytes, None]:
             for i in range(0, len(data), chunk_size):
