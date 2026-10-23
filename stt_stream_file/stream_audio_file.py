@@ -433,6 +433,20 @@ def find_data_chunk_start_in_wav_file(filename: str):
                     f.seek(1, 1)
 
 
+class AudioMetadataMismatch(ValueError):
+    """The file was read successfully, but it doesn't match the URL params."""
+
+
+def _mismatch_error(
+    filename: str, channels: int, sample_rate: int, cause: Exception
+) -> AudioMetadataMismatch:
+    return AudioMetadataMismatch(
+        f"`{filename}` is a {channels}-channel, {sample_rate} Hz audio file, which doesn't "
+        f"match the URL params ({cause}). For containerized audio (WAV/OGG/MP3/FLAC), omit "
+        "encoding/sample_rate/channels from the URL, or set them to match the file."
+    )
+
+
 class VerifyAudioFile:
     @classmethod
     def _validate_results_are_close_to_initial_data(
@@ -446,21 +460,21 @@ class VerifyAudioFile:
             initial_data["channels"] is not None
             and initial_data["channels"] != channels
         ):
-            raise ValueError(
+            raise AudioMetadataMismatch(
                 f"Expected {initial_data['channels']} channels, got {channels}."
             )
         if (
             initial_data["sample_rate"] is not None
             and initial_data["sample_rate"] != sample_rate
         ):
-            raise ValueError(
+            raise AudioMetadataMismatch(
                 f"Expected {initial_data['sample_rate']} sample rate, got {sample_rate}."
             )
         if (
             initial_data["duration"] is not None
             and initial_data["duration"] != duration
         ):
-            raise ValueError(
+            raise AudioMetadataMismatch(
                 f"Expected {initial_data['duration']} duration, got {duration}."
             )
 
@@ -486,6 +500,8 @@ class VerifyAudioFile:
                 initial_data, channels, sample_rate, duration
             )
             return channels, sample_width, sample_rate, duration
+        except AudioMetadataMismatch as e:
+            raise _mismatch_error(filename, channels, sample_rate, e) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -508,6 +524,8 @@ class VerifyAudioFile:
                 initial_data, channels, sample_rate, duration  # type: ignore
             )
             return channels, sample_width, sample_rate, duration
+        except AudioMetadataMismatch as e:
+            raise _mismatch_error(filename, channels, sample_rate, e) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -647,7 +665,7 @@ class VerifyAudioFile:
                 if result is not None:
                     return result
 
-            stderr_output = stderr.read()
+            stderr_output = stderr.getvalue()
             if stderr_output.strip():
                 raise ValueError(
                     f"Could not analyze audio file {filename}\n:\n{stderr_output}"
