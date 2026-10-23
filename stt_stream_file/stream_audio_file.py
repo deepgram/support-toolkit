@@ -23,6 +23,7 @@ import asyncstdlib
 import click.shell_completion
 from tqdm.asyncio import tqdm
 from pydub import AudioSegment  # type: ignore
+from pydub.utils import mediainfo_json  # type: ignore
 
 
 # ============================================================================
@@ -437,11 +438,46 @@ class AudioMetadataMismatch(ValueError):
     """The file was read successfully, but it doesn't match the URL params."""
 
 
+# URL encodings that tell Deepgram the bytes are raw samples, mapped to the
+# ffprobe codec a container file must hold for that label to be correct.
+RAW_ENCODING_CODECS = {
+    "linear16": "pcm_s16le",
+    "linear32": "pcm_f32le",
+    "mulaw": "pcm_mulaw",
+    "alaw": "pcm_alaw",
+}
+
+# The `wave` module only reads PCM, so the codec follows from the sample width.
+WAVE_SAMPLE_WIDTH_CODECS = {
+    1: "pcm_u8",
+    2: "pcm_s16le",
+    3: "pcm_s24le",
+    4: "pcm_s32le",
+}
+
+
+def _probe_audio_codec(filename: str) -> str | None:
+    """Return the ffprobe codec name of the first audio stream, or None if unknown."""
+    try:
+        streams = mediainfo_json(filename).get("streams", [])
+    except Exception:
+        return None
+    for stream in streams:
+        if stream.get("codec_type") == "audio":
+            return stream.get("codec_name")
+    return None
+
+
 def _mismatch_error(
-    filename: str, channels: int, sample_rate: int, cause: Exception
+    filename: str,
+    channels: int,
+    sample_rate: int,
+    cause: Exception,
+    codec: str | None = None,
 ) -> AudioMetadataMismatch:
+    codec_label = f"{codec} " if codec else ""
     return AudioMetadataMismatch(
-        f"`{filename}` is a {channels}-channel, {sample_rate} Hz audio file, which doesn't "
+        f"`{filename}` is a {channels}-channel, {sample_rate} Hz {codec_label}audio file, which doesn't "
         f"match the URL params ({cause}). For containerized audio (WAV/OGG/MP3/FLAC), omit "
         "encoding/sample_rate/channels from the URL, or set them to match the file."
     )
@@ -479,14 +515,29 @@ class VerifyAudioFile:
             )
 
     @classmethod
+    def _validate_encoding_matches_codec(cls, encoding: str | None, codec: str | None):
+        expected_codec = RAW_ENCODING_CODECS.get(encoding)  # type: ignore
+        if expected_codec is None or codec is None:
+            return
+        if codec != expected_codec:
+            raise AudioMetadataMismatch(
+                f"Expected {expected_codec} audio for encoding={encoding}, got {codec}."
+            )
+
+    @classmethod
     def _load_with_wave(
-        cls, filename: str, initial_data: dict[str, int | float | None]
+        cls,
+        filename: str,
+        initial_data: dict[str, int | float | None],
+        encoding: str | None = None,
     ) -> tuple[int, int, int, float] | None:
+        codec = None
         try:
             with wave.open(filename, "rb") as wav_file:
                 channels = wav_file.getnchannels()
                 sample_width = wav_file.getsampwidth()
                 sample_rate = wav_file.getframerate()
+                codec = WAVE_SAMPLE_WIDTH_CODECS.get(sample_width)
 
                 # Normally we'd use `wav_file.getnframes()` to get the number of frames, but the header data is frequently unreliable.
                 # Instead, we calculate the number of frames based on the file size.
@@ -499,9 +550,10 @@ class VerifyAudioFile:
             cls._validate_results_are_close_to_initial_data(
                 initial_data, channels, sample_rate, duration
             )
+            cls._validate_encoding_matches_codec(encoding, codec)
             return channels, sample_width, sample_rate, duration
         except AudioMetadataMismatch as e:
-            raise _mismatch_error(filename, channels, sample_rate, e) from e
+            raise _mismatch_error(filename, channels, sample_rate, e, codec) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -512,20 +564,28 @@ class VerifyAudioFile:
 
     @classmethod
     def _load_with_pydub(
-        cls, filename: str, initial_data: dict[str, int | float | None]
+        cls,
+        filename: str,
+        initial_data: dict[str, int | float | None],
+        encoding: str | None = None,
     ) -> tuple[int, int, int, float] | None:
+        codec = None
         try:
             audio = AudioSegment.from_file(filename)
             channels = audio.channels
             sample_width = audio.sample_width
             sample_rate = audio.frame_rate
             duration = len(audio) / 1000.0  # pydub uses milliseconds
+            # Only probe when the URL claims raw samples; that's the only case we check.
+            if encoding in RAW_ENCODING_CODECS:
+                codec = _probe_audio_codec(filename)
             cls._validate_results_are_close_to_initial_data(
                 initial_data, channels, sample_rate, duration  # type: ignore
             )
+            cls._validate_encoding_matches_codec(encoding, codec)
             return channels, sample_width, sample_rate, duration
         except AudioMetadataMismatch as e:
-            raise _mismatch_error(filename, channels, sample_rate, e) from e
+            raise _mismatch_error(filename, channels, sample_rate, e, codec) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -629,12 +689,12 @@ class VerifyAudioFile:
         # Capture stderr for this function
         with CapturedStderr() as stderr:
             # Try to open the file with wave first
-            result = cls._load_with_wave(filename, initial_data)
+            result = cls._load_with_wave(filename, initial_data, encoding)
             if result is not None:
                 return result
 
             # If that fails, try to open the file with pydub
-            result = cls._load_with_pydub(filename, initial_data)
+            result = cls._load_with_pydub(filename, initial_data, encoding)
             if result is not None:
                 return result
 
