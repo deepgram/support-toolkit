@@ -440,6 +440,10 @@ class AudioMetadataMismatch(ValueError):
 
 # URL encodings that tell Deepgram the bytes are raw samples, mapped to the
 # ffprobe codec a container file must hold for that label to be correct.
+# Raw-only on purpose: any bytes "decode" as raw samples, so a mislabeled
+# compressed file silently becomes garbage. Compressed labels (flac, opus, ...)
+# are far more likely to fail loudly, and don't map 1:1 to ffprobe codecs
+# (e.g. opus vs ogg-opus), so don't add them.
 RAW_ENCODING_CODECS = {
     "linear16": "pcm_s16le",
     "linear32": "pcm_f32le",
@@ -460,7 +464,12 @@ def _probe_audio_codec(filename: str) -> str | None:
     """Return the ffprobe codec name of the first audio stream, or None if unknown."""
     try:
         streams = mediainfo_json(filename).get("streams", [])
-    except Exception:
+    except Exception as e:
+        # stderr is captured during analysis, so warn on the real stream
+        print(
+            f"WARNING: couldn't probe the codec of `{filename}`, so `encoding` wasn't checked: {e}",
+            file=sys.__stderr__,
+        )
         return None
     for stream in streams:
         if stream.get("codec_type") == "audio":
