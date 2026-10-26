@@ -505,8 +505,13 @@ class VerifyAudioFile:
             initial_data["channels"] is not None
             and initial_data["channels"] != channels
         ):
+            hint = (
+                "; `channels` defaults to 1 when `encoding` and `sample_rate` are set"
+                if initial_data["channels"] == 1
+                else ""
+            )
             raise AudioMetadataMismatch(
-                f"Expected {initial_data['channels']} channels, got {channels}."
+                f"Expected {initial_data['channels']} channels, got {channels}{hint}."
             )
         if (
             initial_data["sample_rate"] is not None
