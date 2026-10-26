@@ -690,6 +690,7 @@ class VerifyAudioFile:
         channels: int | None = None,
         sample_rate: int | None = None,
         duration: float | None = None,
+        strict: bool = True,
     ):
         """Analyze the audio file and return its properties."""
         initial_data = {
@@ -702,13 +703,20 @@ class VerifyAudioFile:
 
         # Capture stderr for this function
         with CapturedStderr() as stderr:
-            # Try to open the file with wave first
-            result = cls._load_with_wave(filename, initial_data, encoding)
-            if result is not None:
-                return result
-
-            # If that fails, try to open the file with pydub
-            result = cls._load_with_pydub(filename, initial_data, encoding)
+            try:
+                # Try to open the file with wave first, then pydub
+                result = cls._load_with_wave(filename, initial_data, encoding)
+                if result is None:
+                    result = cls._load_with_pydub(filename, initial_data, encoding)
+            except AudioMetadataMismatch as e:
+                if strict:
+                    raise
+                # stderr is captured in this block, so warn on the real stream
+                print(
+                    f"WARNING: {e}\nTreating the file as raw audio because --skip-verify was passed.",
+                    file=sys.__stderr__,
+                )
+                result = None
             if result is not None:
                 return result
 
@@ -784,6 +792,7 @@ async def stream_audio(  # noqa: C901
     message_callback: Callable | None = None,
     vad: bool = False,
     play_audio: bool = False,
+    skip_verify: bool = False,
 ):
     """
     Stream audio from a file or from the microphone to a Deepgram websocket.
@@ -854,7 +863,7 @@ async def stream_audio(  # noqa: C901
         # which control the pace of the audio sent to the websocket
         # and are used to print useful information.
         channels, sample_width, sample_rate, duration = VerifyAudioFile.analyze(
-            filename, encoding, channels, sample_rate, duration=None
+            filename, encoding, channels, sample_rate, duration=None, strict=not skip_verify
         )
         chunk_size, realtime_resolution = calculate_chunk_parameters(
             channels,
@@ -1158,6 +1167,12 @@ def parse_audio_details_from_url(
     default=False,
     help="play audio through the speaker as it streams (file mode only)",
 )
+@click.option(
+    "--skip-verify",
+    is_flag=True,
+    default=False,
+    help="stream even if the file doesn't match the URL's encoding/sample_rate/channels (e.g. to reproduce a misconfigured client); only linear16 and mulaw have a raw fallback",
+)
 def main(
     output: str,
     url: str,
@@ -1167,6 +1182,7 @@ def main(
     ui: bool = False,
     vad: bool = False,
     play_audio: bool = False,
+    skip_verify: bool = False,
 ):
     if audio is None:
         assert live is True
@@ -1201,7 +1217,7 @@ def main(
     else:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(
-            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose, vad=vad, play_audio=play_audio)
+            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose, vad=vad, play_audio=play_audio, skip_verify=skip_verify)
         )
 
 
