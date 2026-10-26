@@ -433,6 +433,20 @@ def find_data_chunk_start_in_wav_file(filename: str):
                     f.seek(1, 1)
 
 
+class AudioMetadataMismatch(ValueError):
+    """The file was read successfully, but it doesn't match the URL params."""
+
+
+def _mismatch_error(
+    filename: str, channels: int, sample_rate: int, cause: Exception
+) -> AudioMetadataMismatch:
+    return AudioMetadataMismatch(
+        f"`{filename}` is a {channels}-channel, {sample_rate} Hz audio file, which doesn't "
+        f"match the URL params ({cause}). For containerized audio (WAV/OGG/MP3/FLAC), omit "
+        "encoding/sample_rate/channels from the URL, or set them to match the file."
+    )
+
+
 class VerifyAudioFile:
     @classmethod
     def _validate_results_are_close_to_initial_data(
@@ -446,21 +460,26 @@ class VerifyAudioFile:
             initial_data["channels"] is not None
             and initial_data["channels"] != channels
         ):
-            raise ValueError(
-                f"Expected {initial_data['channels']} channels, got {channels}."
+            hint = (
+                "; `channels` defaults to 1 when `encoding` and `sample_rate` are set"
+                if initial_data["channels"] == 1
+                else ""
+            )
+            raise AudioMetadataMismatch(
+                f"Expected {initial_data['channels']} channels, got {channels}{hint}."
             )
         if (
             initial_data["sample_rate"] is not None
             and initial_data["sample_rate"] != sample_rate
         ):
-            raise ValueError(
+            raise AudioMetadataMismatch(
                 f"Expected {initial_data['sample_rate']} sample rate, got {sample_rate}."
             )
         if (
             initial_data["duration"] is not None
             and initial_data["duration"] != duration
         ):
-            raise ValueError(
+            raise AudioMetadataMismatch(
                 f"Expected {initial_data['duration']} duration, got {duration}."
             )
 
@@ -486,6 +505,8 @@ class VerifyAudioFile:
                 initial_data, channels, sample_rate, duration
             )
             return channels, sample_width, sample_rate, duration
+        except AudioMetadataMismatch as e:
+            raise _mismatch_error(filename, channels, sample_rate, e) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -508,6 +529,8 @@ class VerifyAudioFile:
                 initial_data, channels, sample_rate, duration  # type: ignore
             )
             return channels, sample_width, sample_rate, duration
+        except AudioMetadataMismatch as e:
+            raise _mismatch_error(filename, channels, sample_rate, e) from e
         except Exception as e:
             warnings.warn(str(e), stacklevel=1)
             try:
@@ -598,6 +621,7 @@ class VerifyAudioFile:
         channels: int | None = None,
         sample_rate: int | None = None,
         duration: float | None = None,
+        strict: bool = True,
     ):
         """Analyze the audio file and return its properties."""
         initial_data = {
@@ -610,13 +634,20 @@ class VerifyAudioFile:
 
         # Capture stderr for this function
         with CapturedStderr() as stderr:
-            # Try to open the file with wave first
-            result = cls._load_with_wave(filename, initial_data)
-            if result is not None:
-                return result
-
-            # If that fails, try to open the file with pydub
-            result = cls._load_with_pydub(filename, initial_data)
+            try:
+                # Try to open the file with wave first, then pydub
+                result = cls._load_with_wave(filename, initial_data)
+                if result is None:
+                    result = cls._load_with_pydub(filename, initial_data)
+            except AudioMetadataMismatch as e:
+                if strict:
+                    raise
+                # stderr is captured in this block, so warn on the real stream
+                print(
+                    f"WARNING: {e}\nTreating the file as raw audio because --skip-verify was passed.",
+                    file=sys.__stderr__,
+                )
+                result = None
             if result is not None:
                 return result
 
@@ -647,7 +678,7 @@ class VerifyAudioFile:
                 if result is not None:
                     return result
 
-            stderr_output = stderr.read()
+            stderr_output = stderr.getvalue()
             if stderr_output.strip():
                 raise ValueError(
                     f"Could not analyze audio file {filename}\n:\n{stderr_output}"
@@ -692,6 +723,7 @@ async def stream_audio(  # noqa: C901
     message_callback: Callable | None = None,
     vad: bool = False,
     play_audio: bool = False,
+    skip_verify: bool = False,
 ):
     """
     Stream audio from a file or from the microphone to a Deepgram websocket.
@@ -762,7 +794,7 @@ async def stream_audio(  # noqa: C901
         # which control the pace of the audio sent to the websocket
         # and are used to print useful information.
         channels, sample_width, sample_rate, duration = VerifyAudioFile.analyze(
-            filename, encoding, channels, sample_rate, duration=None
+            filename, encoding, channels, sample_rate, duration=None, strict=not skip_verify
         )
         chunk_size, realtime_resolution = calculate_chunk_parameters(
             channels,
@@ -1066,6 +1098,12 @@ def parse_audio_details_from_url(
     default=False,
     help="play audio through the speaker as it streams (file mode only)",
 )
+@click.option(
+    "--skip-verify",
+    is_flag=True,
+    default=False,
+    help="stream even if the file doesn't match the URL's encoding/sample_rate/channels (e.g. to reproduce a misconfigured client); only linear16 and mulaw have a raw fallback",
+)
 def main(
     output: str,
     url: str,
@@ -1075,6 +1113,7 @@ def main(
     ui: bool = False,
     vad: bool = False,
     play_audio: bool = False,
+    skip_verify: bool = False,
 ):
     if audio is None:
         assert live is True
@@ -1109,7 +1148,7 @@ def main(
     else:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(
-            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose, vad=vad, play_audio=play_audio)
+            stream_audio(output, audio, url, encoding, channels, sample_rate, verbose, vad=vad, play_audio=play_audio, skip_verify=skip_verify)
         )
 
 
